@@ -5,11 +5,22 @@
 
 globals
 [year
+ average_capacity
+ green_capacity
+ greenassets
+ green_price
+ green_demand
+ fossilassets
+ fossil_price
+ fossil_demand
+ unmet_green_demand
+ total_demand
 ]
 
 turtles-own
-[clean?
- netzero-strategy]
+[green?
+ netzero-strategy
+]
 
 sellers-own
 [  price-fossil
@@ -17,9 +28,9 @@ sellers-own
  myplants]
 
 buyers-own
-[total_demand
- green_demand
- fossil_demand
+[my_demand
+ my_green_demand
+ my_fossil_demand
   green_premium]
 
 assets-own
@@ -38,101 +49,120 @@ to setup
       [set size 2
        setxy random-xcor random-ycor
        set shape "container"
-       set clean? false
+       set color orange
        set netzero-strategy abs (random-normal avg_netzero_expectation 5)
-       set color brown
+
        hatch-assets 1
-         [ set shape "factory"
-           set age abs (random-normal 30 10)
-           set capacity 1
+         [ ifelse random 100 <= Initial_green_assets
+              [set green? true set color green set shape "sun" set age abs (random-normal 2 5) ]
+              [set green? false set color brown set shape "factory" set age abs (random-normal 30 10)]
            set owner myself
            set lifetime 30
          ]
        set myplants assets with [owner = myself]
        ]
+  set average_capacity Global_capacity / count assets
+  ask assets [set capacity average_capacity]
   create-buyers num_buyers
        [set size 2
         setxy random-xcor random-ycor
         set shape "person business"
-        set clean? false
+        set green? false
          set netzero-strategy abs (random-normal avg_netzero_expectation 10)
-         set color brown
-        set total_demand 1
+         set color pink
+        set my_demand Global_capacity / count buyers
   ]
+  set greenassets assets with [green? = true]
+  set fossilassets assets with [green? = false]
+  set green_capacity sum [capacity] of greenassets
 
+  calculate_prices
   reset-ticks
-  set year year + 1
+
 end
 
 to go
-  calculate_fossil_prices
-  calculate_green_prices
+  retire_old_assets
+  calculate_prices
   purchase
   update_expectations
   make_investments
+  set year year + 1
   tick
 end
 
+to retire_old_assets
+  ask assets
+      [if age > lifetime [die]]
+  set green_capacity sum [capacity] of assets with [green? = true]
+  set Global_capacity sum [capacity] of assets
+  set greenassets assets with [green? = true]
+  set fossilassets assets with [green? = false]
+end
 
-to calculate_fossil_prices
-  ask assets with [clean? = false] ; change this to be representative of a real asset
+to calculate_prices
+  ask fossilassets ; change this to be representative of a real asset
       [ if age > lifetime [die]
         set price Initial_Fossil_Cost ]
-
+  set fossil_price [price] of one-of fossilassets
+  ifelse any? greenassets
+     [ask greenassets
+       [ set available_capacity capacity
+          set price (Initial_Green_Cost * (1 - Improvement_rate) ^ (LN(green_capacity) / LN (2)))
+        ]
+        set green_price [price] of one-of greenassets
+     ]
+    [set green_price 0 ]
 end
 
-to calculate_green_prices
 
-  ask assets with [clean? = true]
-      [ set available_capacity capacity
-        set price (Initial_Green_Cost - 10 * ticks)
-       ] ; change this to be a function of capacity
-
-end
 
 to purchase
+  set unmet_green_demand 0
+  set total_demand sum [my_demand] of buyers
   ask buyers
-  [ set green_demand (total_demand / (netzero-strategy - year)); green demand = the fraction of their total need that they would want to be green for linear net zero scaling
-    set green_premium  (1 + green_demand ) * mean [price] of assets with [clean? = false]
-    set fossil_demand (total_demand - green_demand)
-    if count assets with [clean? = true] > 0
-    [let greenassets assets with [clean? = true]
-     if [price] of one-of greenassets <= [green_premium] of self
-        [ let newdemand [green_demand] of self
-          set greenassets greenassets with [available_capacity > newdemand]
-            ask one-of greenassets with [price < [green_premium] of myself]
-                  [ show price
-                    show [green_premium] of myself
-                    show newdemand
-                    set available_capacity available_capacity - newdemand]
-             ]
-    ]
-  ]
+  [ set my_green_demand (my_demand / (netzero-strategy - year)); green demand = the fraction of their total need that they would want to be green for linear net zero scaling
+    set green_premium ( 1 + 1 / (netzero-strategy - year)) * (mean [price] of fossilassets) ;;; highly suspect what this might be. Could we calibrate with early solar data frrom REBA?
+
+    set my_fossil_demand (my_demand - my_green_demand)
+    ifelse green_capacity > my_green_demand
+       [ if [price] of one-of greenassets <= green_premium
+          [ set green_capacity green_capacity - my_green_demand
+          ]
+       ]
+       [set unmet_green_demand unmet_green_demand + my_green_demand
+       ]
+   ]
+  set fossil_demand sum [my_fossil_demand] of buyers
 end
 
 to update_expectations
-  ask sellers
-  [ set netzero-strategy netzero-strategy - sum [green_demand] of buyers ]
+  set green_capacity sum [capacity] of assets with [green? = true]
+  if any? greenassets
+  [ask sellers
+      [ set netzero-strategy netzero-strategy - (unmet_green_demand / green_capacity)  ]
+  ]
   ask buyers
-  [ set netzero-strategy netzero-strategy - 5]
+  [ set netzero-strategy netzero-strategy - 1]
 end
 
 to make_investments
-  ask assets
-  [if (lifetime - age < 5)
-    [hatch 1
-      [ set capacity 1
-        set owner myself
-        set lifetime 30
-        set age 0
-        if year + lifetime > netzero-strategy ;add in idea that if cost of green < cost of brown, build green
-            [set shape "sun"
-             set color green
-             set clean? true
-            ]
+  ask sellers
+  [ if total_demand > sum [capacity] of assets ; if more demand was needed this year
+    [ hatch-assets 1
+      [ifelse green_price < fossil_price
+        [set green? true set color green set shape "sun" set age 0 set capacity average_capacity  ] ;build green if it's cheapest
+              [ifelse netzero-strategy - year < 30 ;if net zero strategy expects less than 30 years of service from a fossil asset, build green
+                 [set green? true set color green set shape "sun" set age 0 set capacity average_capacity ]
+                 [set green? false set color brown set shape "factory" set age 0 set capacity average_capacity ]
+              ]
+       set owner myself
+       set lifetime 30
       ]
     ]
-  ]
+   ]
+
+
 
 end
 @#$#@#$#@
@@ -181,10 +211,10 @@ NIL
 1
 
 SLIDER
-21
-87
-193
-120
+24
+97
+221
+130
 num_sellers
 num_sellers
 0
@@ -197,9 +227,9 @@ HORIZONTAL
 
 SLIDER
 24
-132
-196
-165
+135
+217
+168
 num_buyers
 num_buyers
 0
@@ -213,13 +243,13 @@ HORIZONTAL
 SLIDER
 22
 173
-250
+217
 206
 avg_netzero_expectation
 avg_netzero_expectation
 2040
 2100
-2046.0
+2058.0
 1
 1
 NIL
@@ -260,8 +290,8 @@ true
 "" ""
 PENS
 "Total Capacity" 1.0 0 -16777216 true "" "plot sum [capacity] of assets"
-"Fossil demand" 1.0 0 -10146808 true "" "plot sum [fossil_demand] of buyers"
-"Green demand" 1.0 0 -14439633 true "" "plot sum [green_demand] of buyers"
+"Fossil demand" 1.0 0 -10146808 true "" "plot sum [my_fossil_demand] of buyers"
+"Green demand" 1.0 0 -14439633 true "" "plot sum [my_green_demand] of buyers"
 
 BUTTON
 133
@@ -326,8 +356,53 @@ true
 true
 "" ""
 PENS
-"Fossil price" 1.0 0 -12440034 true "" "plot mean [price] of assets with [clean? = false]"
-"Green price" 1.0 0 -15040220 true "" "plot mean [price] of assets with [clean? = true]"
+"Fossil price" 1.0 0 -12440034 true "" "plot mean [price] of fossilassets "
+"Green price" 1.0 0 -15040220 true "" "plot mean [price] of greenassets "
+
+SLIDER
+242
+111
+421
+144
+Initial_green_assets
+Initial_green_assets
+0
+100
+24.0
+1
+1
+%
+HORIZONTAL
+
+SLIDER
+239
+155
+417
+188
+Global_capacity
+Global_capacity
+0
+100
+0.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+239
+196
+419
+229
+Improvement_rate
+Improvement_rate
+0
+.3
+0.16
+.01
+1
+NIL
+HORIZONTAL
 
 @#$#@#$#@
 ## WHAT IS IT?
